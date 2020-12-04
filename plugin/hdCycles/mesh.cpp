@@ -836,6 +836,9 @@ void
 HdCyclesMesh::_PopulateGenerated(ccl::Scene* scene)
 {
     if (m_cyclesMesh->need_attribute(scene, ccl::ATTR_STD_GENERATED)) {
+        ccl::float3 loc, size;
+        _MeshTextureSpace(loc, size);
+
         ccl::AttributeSet* attributes = (m_useSubdivision)
                                             ? &m_cyclesMesh->subd_attributes
                                             : &m_cyclesMesh->attributes;
