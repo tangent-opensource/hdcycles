@@ -20,6 +20,7 @@
 #include "renderParam.h"
 
 #include "config.h"
+#include "renderBuffer.h"
 #include "renderDelegate.h"
 #include "utils.h"
 
@@ -68,6 +69,7 @@ HdCyclesRenderParam::HdCyclesRenderParam()
     , m_lightsUpdated(false)
     , m_shadersUpdated(false)
     , m_renderProgress(0)
+    , m_useTiledRendering(false)
 {
     _InitializeDefaults();
 }
@@ -80,6 +82,7 @@ HdCyclesRenderParam::_InitializeDefaults()
     static const HdCyclesConfig& config = HdCyclesConfig::GetInstance();
     m_deviceName                        = config.device_name.value;
     m_useSquareSamples                  = config.use_square_samples.value;
+    m_useTiledRendering                 = config.use_tiled_rendering;
 
 #ifdef WITH_CYCLES_LOGGING
     if (config.cycles_enable_logging) {
@@ -93,6 +96,12 @@ float
 HdCyclesRenderParam::GetProgress()
 {
     return m_cyclesSession->progress.get_progress();
+}
+
+bool
+HdCyclesRenderParam::IsConverged()
+{
+    return GetProgress() >= 1.0f;
 }
 
 void
@@ -119,6 +128,114 @@ HdCyclesRenderParam::_SessionPrintStatus()
 
         std::cout << "cycles: " << progress << " : " << status << '\n';
     }
+}
+
+// URGENT TODO: Put this and the initialization somewhere more secure
+struct HdCyclesDefaultAov {
+    std::string name;
+    ccl::PassType type;
+    TfToken token;
+    HdFormat format;
+    //int components;
+};
+
+std::vector<HdCyclesDefaultAov> DefaultAovs = {
+    { "Combined", ccl::PASS_COMBINED, HdAovTokens->color, HdFormatFloat32Vec4 },
+    //{ "Depth", ccl::PASS_DEPTH, HdAovTokens->depth, HdFormatFloat32 },
+    //{ "Normal", ccl::PASS_NORMAL, HdAovTokens->normal, HdFormatFloat32Vec4 },
+    //{ "DiffDir", ccl::PASS_DIFFUSE_DIRECT, HdCyclesAovTokens->DiffDir, HdFormatFloat32Vec4 },
+    //{ "IndexOB", ccl::PASS_OBJECT_ID, HdAovTokens->primId, HdFormatFloat32 },
+    //{ "Mist", ccl::PASS_MIST, HdAovTokens->depth, HdFormatFloat32 },
+
+};
+
+void
+HdCyclesRenderParam::_WriteRenderTile(ccl::RenderTile& rtile)
+{
+    // No session, exit out
+    if (!m_cyclesSession)
+        return;
+
+    if (!m_useTiledRendering)
+        return;
+
+    const int x = rtile.x;
+    const int y = rtile.y;
+    const int w = rtile.w;
+    const int h = rtile.h;
+
+    //std::cout << "tile x: " << x << " | y: " << y << " | w: " << w << " | h: " << h << '\n';
+
+    ccl::RenderBuffers* buffers = rtile.buffers;
+
+    // copy data from device
+    if (!buffers->copy_from_device())
+        return;
+
+    // Adjust absolute sample number to the range.
+    int sample = rtile.sample;
+    const int range_start_sample
+        = m_cyclesSession->tile_manager.range_start_sample;
+    if (range_start_sample != -1) {
+        sample -= range_start_sample;
+    }
+
+    const float exposure = m_cyclesScene->film->exposure;
+
+    if (!m_aovs.empty()) {
+        // Blit from the framebuffer to currently selected aovs...
+        for (auto& aov : m_aovs) {
+            if (!TF_VERIFY(aov.renderBuffer != nullptr)) {
+                continue;
+            }
+
+            auto* rb = static_cast<HdCyclesRenderBuffer*>(aov.renderBuffer);
+
+            if (rb == nullptr) {
+                continue;
+            }
+
+            if (rb->GetFormat() == HdFormatInvalid) {
+                continue;
+            }
+
+            for (HdCyclesDefaultAov& cyclesAov : DefaultAovs) {
+                if (aov.aovName == cyclesAov.token) {
+                    rb->SetConverged(IsConverged());
+
+                    // Pixels we will use to get from cycles.
+                    int numComponents = HdGetComponentCount(cyclesAov.format);
+
+                    ccl::vector<float> tileData(w * h * numComponents);
+
+                    bool read = buffers->get_pass_rect(cyclesAov.name.c_str(),
+                                                       exposure, sample,
+                                                       numComponents,
+                                                       &tileData[0]);
+
+                    if (!read) {
+                        memset(&tileData[0], 0,
+                               tileData.size() * sizeof(float));
+                    }
+
+                    rb->BlitTile(cyclesAov.format, rtile.x, rtile.y, rtile.w,
+                                 rtile.h, 0, rtile.w,
+                                 reinterpret_cast<uint8_t*>(tileData.data()));
+                }
+            }
+        }
+    }
+
+    //if(IsConverged() && IsTiledRender()) {
+    //  StopRender();
+    //}
+}
+
+void
+HdCyclesRenderParam::_UpdateRenderTile(ccl::RenderTile& rtile, bool highlight)
+{
+    //if (m_cyclesSession->params.progressive_refine)
+    //_WriteRenderTile(rtile);
 }
 
 /*
@@ -200,6 +317,17 @@ HdCyclesRenderParam::_UpdateSessionFromConfig(bool a_forceInit)
     config.pixel_size.eval(m_sessionParams.pixel_size, a_forceInit);
     //m_sessionParams.tile_size.x                = config.tile_size[0];64
     //m_sessionParams.tile_size.y                = config.tile_size[1];64
+
+    // Hardcoded tempoarily
+    params.tile_size.x = 64;
+    params.tile_size.y = 64;
+
+    if (m_useTiledRendering) {
+        params.start_resolution   = INT_MAX;
+        params.progressive        = false;
+        params.progressive_refine = false;
+        params.tile_order         = ccl::TILE_HILBERT_SPIRAL;
+    }
 
     config.max_samples.eval(m_sessionParams.samples, a_forceInit);
 }
@@ -890,6 +1018,12 @@ HdCyclesRenderParam::_CreateSession()
 
     m_cyclesSession = new ccl::Session(m_sessionParams);
 
+    m_cyclesSession->write_render_tile_cb
+        = std::bind(&HdCyclesRenderParam::_WriteRenderTile, this, ccl::_1);
+    m_cyclesSession->update_render_tile_cb
+        = std::bind(&HdCyclesRenderParam::_UpdateRenderTile, this, ccl::_1,
+                    ccl::_2);
+
     if (HdCyclesConfig::GetInstance().enable_logging
         || HdCyclesConfig::GetInstance().enable_progress)
         m_cyclesSession->progress.set_update_callback(
@@ -1145,7 +1279,7 @@ HdCyclesRenderParam::_CyclesExit()
 void
 HdCyclesRenderParam::CyclesReset(bool a_forceUpdate)
 {
-    m_cyclesScene->mutex.lock();
+    //m_cyclesScene->mutex.lock();
 
     m_cyclesSession->progress.reset();
 

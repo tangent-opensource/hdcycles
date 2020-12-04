@@ -120,6 +120,13 @@ if(DEFINED ENV{REZ_OPENVDB_BASE})
 endif()
 
 find_package(Embree)
+if(${Embree_FOUND})
+  message(" - HdCycles built with Embree")
+  add_definitions(-DWITH_EMBREE)
+  add_definitions(-DEMBREE_STATIC_LIB)
+endif()
+#find_package(OpenVDB)
+
 find_package(OpenColorIO)
 
 find_package(USD REQUIRED)

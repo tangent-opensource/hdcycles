@@ -73,6 +73,8 @@ TF_INSTANTIATE_SINGLETON(HdCyclesConfig);
 
 /* ====== HdCycles Settings ====== */
 
+TF_DEFINE_ENV_SETTING(HD_CYCLES_USE_TILED_RENDERING, false,
+                      "Use Tiled Rendering (Experimental)");
 
 TF_DEFINE_ENV_SETTING(CYCLES_ENABLE_LOGGING, false, "Enable HdCycles Logging");
 
@@ -93,6 +95,8 @@ HdCyclesConfig::HdCyclesConfig()
     cycles_logging_severity = TfGetEnvSetting(CYCLES_LOGGING_SEVERITY);
 
     // -- HdCycles Settings
+    use_tiled_rendering = TfGetEnvSetting(HD_CYCLES_USE_TILED_RENDERING);
+
     enable_logging  = TfGetEnvSetting(HD_CYCLES_ENABLE_LOGGING);
     enable_progress = TfGetEnvSetting(HD_CYCLES_ENABLE_PROGRESS);
 
